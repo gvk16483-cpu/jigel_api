@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\vamkr\OneDrive\Desktop\Innovathon_final\NLP_Model\app.py", line 143, in predict_email
-    print(f"Failed to call Agent: {agent_err}") # Keep logging
-                                   ^^^^^^^^^
-UnboundLocalError: cannot access local variable 'agent_err' where it is not associated with a value

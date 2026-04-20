@@ -1,8 +1,0 @@
-scikit-learn>=1.0
-pandas
-joblib
-numpy
-sklearn
-google-generativeai
-fastapi
-uvicorn
