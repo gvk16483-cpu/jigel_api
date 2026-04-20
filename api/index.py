@@ -10,18 +10,18 @@ import os
 import traceback
 import time
 import joblib
-import numpy as np
-from urllib.parse import urlparse
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from features import structural_features
+    from features import structural_features  # noqa: F401 - required for joblib model loading
     from detect import predict as ml_predict
+    IMPORT_ERROR = None
 except ImportError as e:
     print(f"Import error: {e}. Using fallback detection.")
     ml_predict = None
+    IMPORT_ERROR = str(e)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -33,24 +33,38 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "clean_mod
 # Global model cache
 _GLOBAL_MODEL = None
 
+
 def get_model(model_path):
-    """Load or retrieve cached model"""
+    """Load or retrieve cached model."""
     global _GLOBAL_MODEL
     if _GLOBAL_MODEL is None:
         try:
             _GLOBAL_MODEL = joblib.load(model_path)
-            print(f"✅ Model loaded: {model_path}")
+            print(f"[VERCEL] Model loaded: {model_path}")
         except Exception as e:
-            print(f"❌ Model load failed: {e}")
+            print(f"[VERCEL] Model load failed: {e}")
             _GLOBAL_MODEL = None
     return _GLOBAL_MODEL
+
+
+def get_runtime_status():
+    model_exists = os.path.exists(MODEL_PATH)
+    model = get_model(MODEL_PATH) if model_exists else None
+    return {
+        "import_ok": ml_predict is not None,
+        "import_error": IMPORT_ERROR,
+        "model_path": MODEL_PATH,
+        "model_exists": model_exists,
+        "model_loaded": model is not None,
+    }
+
 
 @app.route('/predict', methods=['POST'])
 @app.route('/api/predict', methods=['POST'])
 def predict_email():
     """
-    Main prediction endpoint for fraud detection
-    
+    Main prediction endpoint for fraud detection.
+
     Request JSON:
     {
         "subject": "Email subject",
@@ -61,32 +75,37 @@ def predict_email():
     }
     """
     start_time = time.time()
-    
+
     try:
         data = request.json or {}
-        print(f"[VERCEL] Received prediction request")
-        
-        # Extract fields
+        print("[VERCEL] Received prediction request")
+
         subject = data.get("subject", "")
         body = data.get("body", "")
         sender = data.get("from") or data.get("sender", "")
-        links = data.get("links", [])
         platform = data.get("platform", "unknown")
 
-        # Combine text for analysis
         text = f"{subject} {body}".strip()
 
-        # ==========================================
-        # 🔹 ML MODEL DECISION (ONLY)
-        # ==========================================
-        
-        # Use the detect.predict function
-        result = ml_predict(MODEL_PATH, text, sender) if ml_predict else None
-        
+        runtime_status = get_runtime_status()
+        if not runtime_status["import_ok"] or not runtime_status["model_loaded"]:
+            print(f"[VERCEL] ML runtime unavailable: {runtime_status}")
+            return jsonify({
+                "error": "ML runtime unavailable",
+                "risk_label": "error",
+                "final_risk_label": "error",
+                "final_score": 0.0,
+                "explanation": "Deployed model is unavailable. Check Vercel imports and model file packaging.",
+                "platform": platform,
+                "runtime_status": runtime_status
+            }), 503
+
+        result = ml_predict(MODEL_PATH, text, sender)
+
         if result:
             ml_score = result.get("final_score", 0.0)
             is_hard_scam = result.get("prediction", 0) == 1
-            
+
             ml_risk_label = "safe"
             if ml_score > 0.8:
                 ml_risk_label = "dangerous"
@@ -95,37 +114,26 @@ def predict_email():
             if is_hard_scam and ml_risk_label == "safe":
                 ml_risk_label = "suspicious"
         else:
-            # Fallback if model unavailable
             ml_score = 0.0
-            ml_risk_label = "safe"
+            ml_risk_label = "error"
 
-        # Final decision is purely from ML model
-        final_risk_label = ml_risk_label
-        final_score = ml_score
-        explanation = "Analysis based on Machine Learning Model."
-        detected_patterns = []
-
-        # ==========================================
-        # 🔹 RESPONSE FORMATTING
-        # ==========================================
-        
         scan_response = {
-            "risk_label": final_risk_label,
-            "final_risk_label": final_risk_label,
-            "final_score": float(final_score),
-            "explanation": explanation,
+            "risk_label": ml_risk_label,
+            "final_risk_label": ml_risk_label,
+            "final_score": float(ml_score),
+            "explanation": "Analysis based on Machine Learning Model.",
             "ml_score": float(ml_score),
             "agent_score": None,
             "platform": platform,
-            "detected_patterns": detected_patterns,
+            "detected_patterns": [],
             "processing_time_ms": int((time.time() - start_time) * 1000)
         }
-        
-        print(f"[VERCEL] ✅ Result: {final_risk_label} ({final_score:.2f})")
+
+        print(f"[VERCEL] Result: {ml_risk_label} ({ml_score:.2f})")
         return jsonify(scan_response), 200
 
     except Exception as e:
-        print(f"[VERCEL] ❌ Error: {e}")
+        print(f"[VERCEL] Error: {e}")
         traceback.print_exc()
         return jsonify({
             "error": str(e),
@@ -136,30 +144,32 @@ def predict_email():
             "platform": data.get("platform", "unknown") if 'data' in locals() else "unknown"
         }), 500
 
-@app.route('/health', methods=['GET'])
+
 @app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
+    """Health check endpoint."""
     return jsonify({
         "status": "healthy",
         "service": "Fraud Detection API",
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "runtime_status": get_runtime_status()
     }), 200
+
 
 @app.route('/', methods=['GET'])
 def index():
-    """Root endpoint"""
+    """Root endpoint."""
     return jsonify({
         "service": "Fraud Detection API",
-        "version": "2.0",
+        "version": "2.1",
         "endpoints": {
             "predict": "/predict (POST) or /api/predict (POST)",
             "health": "/health (GET) or /api/health (GET)"
         }
     }), 200
 
-# Error handler for 404
+
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({
@@ -171,7 +181,7 @@ def not_found(e):
         }
     }), 404
 
-# Error handler for 500
+
 @app.errorhandler(500)
 def server_error(e):
     return jsonify({
@@ -179,12 +189,11 @@ def server_error(e):
         "message": str(e)
     }), 500
 
-# For WSGI compatibility with Vercel
+
 if __name__ != "__main__":
-    # This runs when deployed on Vercel
     pass
 
+
 if __name__ == "__main__":
-    # For local development
     print("Starting Fraud Detection API...")
     app.run(debug=False, host='0.0.0.0', port=5000)
